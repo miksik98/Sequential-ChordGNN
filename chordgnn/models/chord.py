@@ -7,6 +7,7 @@ from pytorch_lightning import LightningModule
 from chordgnn.metrics.eval import MultitaskAccuracy
 import pandas as pd
 import rotograd
+import numpy as np
 
 
 class MultiTaskLoss(nn.Module):
@@ -16,6 +17,7 @@ class MultiTaskLoss(nn.Module):
     Learning weights for each task according to the paper:
         Liebel L, Körner M. Auxiliary tasks in multi-task learning[J]
     """
+
     def __init__(self, tasks: list, loss_ft: nn.ModuleDict, loss_weights: dict = None, requires_grad=True):
         super(MultiTaskLoss, self).__init__()
         assert (set(tasks) == set(loss_ft.keys()))
@@ -86,7 +88,8 @@ class OnsetEdgePooling(nn.Module):
         device = x.get_device()
         if device > 0:
             adj = torch.sparse_coo_tensor(
-                edge_index, torch.ones(len(edge_index[0])).to(x.get_device()), (len(x), len(x))).to_dense().to(x.get_device())
+                edge_index, torch.ones(len(edge_index[0])).to(x.get_device()), (len(x), len(x))).to_dense().to(
+                x.get_device())
         else:
             adj = torch.sparse_coo_tensor(
                 edge_index, torch.ones(len(edge_index[0])), (len(x), len(x))).to_dense()
@@ -138,7 +141,7 @@ class OnsetEdgePooling(nn.Module):
         new_edge_score = edge_score[new_edge_indices]
         if len(nodes_remaining) > 0:
             remaining_score = x.new_ones(
-                (new_x.size(0) - len(new_edge_indices), ))
+                (new_x.size(0) - len(new_edge_indices),))
             new_edge_score = torch.cat([new_edge_score, remaining_score])
         new_x = new_x * new_edge_score.view(-1, 1)
 
@@ -267,7 +270,7 @@ class OnsetEdgePoolingVersion2(nn.Module):
         Return types:
             * **x** *(Tensor)* - The pooled node features.
         """
-        device = x.get_device() if x.get_device()>=0 else "cpu"
+        device = x.get_device() if x.get_device() >= 0 else "cpu"
         # if device >= 0:
         #     adj = torch.sparse_coo_tensor(
         #         edge_index, torch.ones(len(edge_index[0])).to(device), (len(x), len(x))).to_dense().to(device)
@@ -278,7 +281,8 @@ class OnsetEdgePoolingVersion2(nn.Module):
         # h = torch.mm(adj, self.trans(x)) / adj.sum(dim=1).reshape(adj.shape[0], -1)
         # add self loops to edge_index with size (2, num_edges + num_nodes)
         edge_index_sl = torch.cat([edge_index, torch.arange(x.size(0)).view(1, -1).repeat(2, 1).to(device)], dim=1)
-        h = scatter(self.trans(x)[edge_index_sl[0]], edge_index_sl[1], 0, out=torch.zeros(x.shape).to(device), reduce='mean')
+        h = scatter(self.trans(x)[edge_index_sl[0]], edge_index_sl[1], 0, out=torch.zeros(x.shape).to(device),
+                    reduce='mean')
         if idx is not None:
             out = h[idx]
         else:
@@ -310,7 +314,6 @@ class OnsetEdgePoolingVersion2(nn.Module):
             if source == target:
                 continue
 
-
             # remove the source node from the remaining nodes
             nodes_remaining[source] = 0
             # remove the target node from the discarded nodes
@@ -325,7 +328,8 @@ class NadeClf(nn.Module):
     def __init__(self, input_size, n_hidden, out_dim, n_layers, activation=F.relu, dropout=0.5):
         super(NadeClf, self).__init__()
         self.VtoH = nn.Linear(out_dim, input_size, bias=False)
-        self.HtoV = MLP(input_size, n_hidden, out_dim, n_layers=n_layers, bias=True, activation=activation, dropout=dropout)
+        self.HtoV = MLP(input_size, n_hidden, out_dim, n_layers=n_layers, bias=True, activation=activation,
+                        dropout=dropout)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -341,7 +345,8 @@ class NadeClassifierLayer(nn.Module):
     def __init__(self, input_size, n_hidden, tasks, n_layers, activation=F.relu, dropout=0.5):
         super(NadeClassifierLayer, self).__init__()
         self.tasks = tasks
-        self.classifier = nn.ModuleDict({task: NadeClf(input_size, n_hidden, tdim, n_layers, activation, dropout) for task, tdim in tasks.items()})
+        self.classifier = nn.ModuleDict(
+            {task: NadeClf(input_size, n_hidden, tdim, n_layers, activation, dropout) for task, tdim in tasks.items()})
 
     def forward(self, h):
         prediction = {}
@@ -349,10 +354,9 @@ class NadeClassifierLayer(nn.Module):
             prediction[task], h = self.classifier[task](h)
         return prediction
 
-
-class MultiTaskMLP(nn.Module):
+class MultiTaskParallelMLP(nn.Module):
     def __init__(self, in_feats, n_hidden, tasks: dict, n_layers, activation=F.relu, dropout=0.5):
-        super(MultiTaskMLP, self).__init__()
+        super(MultiTaskParallelMLP, self).__init__()
         self.dropout = dropout
         self.n_layers = n_layers
         self.tasks = tasks
@@ -370,6 +374,43 @@ class MultiTaskMLP(nn.Module):
             prediction[task] = self.classifier[task](x)
         return prediction
 
+class MultiTaskSequentialMLP(nn.Module):
+    def __init__(self, in_feats, n_hidden, tasks: dict, n_layers, activation=F.relu, dropout=0.5, tasks_order=[]):
+        super(MultiTaskSequentialMLP, self).__init__()
+        self.main_tasks = tasks_order
+        self.main_tasks_flattened = [item for sublist in self.main_tasks for item in sublist]
+        self.dropout = dropout
+        self.n_layers = n_layers
+        self.tasks = tasks
+        dictionary = {task: MLP(in_feats, n_hidden, tdim, n_layers, activation, dropout) for task, tdim in tasks.items()
+                      if task not in self.main_tasks_flattened}
+        for i, parallel_tasks in enumerate(self.main_tasks):
+            additional_factor = sum([tasks[prev_task] for prev_tasks in self.main_tasks[:i] for prev_task in prev_tasks])
+            dictionary.update(
+                {task: MLP(in_feats + additional_factor, n_hidden, tasks[task], n_layers, activation, dropout)
+                 for task in parallel_tasks}
+            )
+        self.classifier = nn.ModuleDict(dictionary)
+
+    def reset_parameters(self):
+        for task in self.tasks.keys():
+            self.classifier[task].reset_parameters()
+
+    def forward(self, x):
+        prediction = {}
+        for task in self.tasks.keys():
+            if task not in self.main_tasks_flattened:
+                prediction[task] = self.classifier[task](x)
+        for tasks in self.main_tasks:
+            tensor = x
+            first_task = tasks[0]
+            for prev_task in self.main_tasks_flattened:
+                if prev_task == first_task:
+                    break
+                tensor = torch.cat((tensor, prediction[prev_task]), dim=1)
+            for task in tasks:
+                prediction[task] = self.classifier[task](tensor)
+        return prediction
 
 class ChordEncoder(nn.Module):
     def __init__(self, in_feats, n_hidden, n_layers, activation=F.relu, dropout=0.5, use_jk=False):
@@ -377,19 +418,19 @@ class ChordEncoder(nn.Module):
         self.activation = activation
         self.spelling_embedding = nn.Embedding(49, 16)
         self.pitch_embedding = nn.Embedding(128, 16)
-        self.embedding = nn.Linear(in_feats-3, 32)
+        self.embedding = nn.Linear(in_feats - 3, 32)
         # self.embedding = nn.Linear(in_feats-1, n_hidden)
-        self.encoder = HGCN(64, n_hidden*2, n_hidden, n_layers, activation=activation, dropout=dropout, jk=use_jk)
+        self.encoder = HGCN(64, n_hidden * 2, n_hidden, n_layers, activation=activation, dropout=dropout, jk=use_jk)
         # self.encoder = HResGatedConv(64, n_hidden*2, n_hidden, n_layers, activation=activation, dropout=dropout, jk=use_jk)
         # self.etypes = {"onset":0, "consecutive":1, "during":2, "rests":3, "consecutive_rev":4, "during_rev":5, "rests_rev":6}
         # self.encoder = HeteroResGatedGraphConvLayer(n_hidden, n_hidden, etypes=self.etypes, reduction="none")
         # self.reduction = HeteroAttention(n_hidden, len(self.etypes.keys()))
         self.pool = OnsetEdgePoolingVersion2(n_hidden, dropout=dropout)
-        self.proj1 = nn.Linear(n_hidden+1, n_hidden)
+        self.proj1 = nn.Linear(n_hidden + 1, n_hidden)
         self.layernorm1 = nn.BatchNorm1d(n_hidden)
-        self.proj2 = nn.Linear(n_hidden, n_hidden//2)
-        self.layernorm2 = nn.BatchNorm1d(n_hidden//2)
-        self.gru = nn.GRU(input_size=n_hidden//2, hidden_size=int(n_hidden/2), num_layers=2, bidirectional=True,
+        self.proj2 = nn.Linear(n_hidden, n_hidden // 2)
+        self.layernorm2 = nn.BatchNorm1d(n_hidden // 2)
+        self.gru = nn.GRU(input_size=n_hidden // 2, hidden_size=int(n_hidden / 2), num_layers=2, bidirectional=True,
                           batch_first=True, dropout=dropout)
         self.layernormgru = nn.LayerNorm(n_hidden)
         self.reset_parameters()
@@ -436,7 +477,7 @@ class ChordEncoder(nn.Module):
 
 
 class ChordPredictionModel(nn.Module):
-    def __init__(self, in_feats, n_hidden=256, tasks: dict = {
+    def __init__(self, in_feats, tasks_order=[], n_hidden=256, tasks: dict = {
         "localkey": 38, "tonkey": 38, "degree1": 22, "degree2": 22, "quality": 11, "inversion": 4,
         "root": 35, "romanNumeral": 31, "hrhythm": 7, "pcset": 121, "bass": 35, "tenor": 35,
         "alto": 35, "soprano": 35}, n_layers=1, activation=F.relu, dropout=0.5, use_nade=False, use_jk=False):
@@ -446,9 +487,21 @@ class ChordPredictionModel(nn.Module):
         self.tasks = tasks
         self.encoder = ChordEncoder(in_feats, n_hidden, n_layers, activation=activation, dropout=dropout, use_jk=use_jk)
         if use_nade:
-            self.classifier = NadeClassifierLayer(n_hidden, n_hidden, tasks=tasks, n_layers=1, activation=activation, dropout=dropout)
+            self.classifier = NadeClassifierLayer(n_hidden, n_hidden, tasks=tasks, n_layers=1, activation=activation,
+                                                  dropout=dropout)
         else:
-            self.classifier = MultiTaskMLP(n_hidden, n_hidden, tasks=tasks, n_layers=1, activation=activation, dropout=dropout)
+            if len(tasks_order) <= 1:
+                print("Using parallel multi-task MLP")
+                self.classifier = MultiTaskParallelMLP(n_hidden, n_hidden, tasks=tasks, n_layers=1, activation=activation,
+                                               dropout=dropout)
+            else:
+                if set(set([item for sublist in tasks_order for item in sublist])) <= set(tasks.keys()):
+                    print(f"Using sequential multi-task MLP with tasks order: {tasks_order}")
+                    self.classifier = MultiTaskSequentialMLP(n_hidden, n_hidden, tasks=tasks, n_layers=1,
+                                                             activation=activation,
+                                                             dropout=dropout, tasks_order=tasks_order)
+                else:
+                    raise AttributeError("Invalid tasks passed in 'mlp_tasks_order' arg")
 
     def forward(self, batch):
         x, edge_index, edge_type, onset_index, onset_idx, lengths = batch
@@ -465,7 +518,8 @@ class ChordPredictionModel(nn.Module):
         measure_names = [m.number for m in score.parts[0].measures]
         s_measure = torch.zeros((len(unique_onset_divs)))
         for idx, measure_num in enumerate(measure_names):
-            s_measure[torch.where((unique_onset_divs >= measures[idx, 0]) & (unique_onset_divs < measures[idx, 1]))] = measure_num
+            s_measure[torch.where(
+                (unique_onset_divs >= measures[idx, 0]) & (unique_onset_divs < measures[idx, 1]))] = measure_num
         nodes, edges = hetero_graph_from_note_array(note_array=note_array)
         note_features = select_features(note_array, "chord")
         onset_idx = unique_onsets(torch.tensor(note_array["onset_div"]))
@@ -484,17 +538,29 @@ class PostProcessingMLTModel(nn.Module):
     """
     Post-processing module for the MLT model using a sequential model.
     """
-    def __init__(self, tasks, n_hidden, n_layers, activation=F.relu, dropout=0.0):
+
+    def __init__(self, tasks, n_hidden, n_layers, activation=F.relu, dropout=0.0, tasks_order=[]):
         super().__init__()
         self.tasks = tasks
+        self.main_tasks = tasks_order
+        self.main_tasks_flattened = [item for sublist in self.main_tasks for item in sublist]
         self.n_hidden = n_hidden
         self.n_layers = n_layers
         logits_dim = sum(list(self.tasks.values()))
         self.lstm = nn.LSTM(logits_dim, n_hidden, n_layers, batch_first=True, bidirectional=True, dropout=dropout)
-        self.fc = nn.Linear(n_hidden*2, n_hidden)
-        self.clf = nn.ModuleDict({task: nn.Linear(n_hidden, n_classes) for task, n_classes in self.tasks.items()})
+        self.fc = nn.Linear(n_hidden * 2, n_hidden)
+        dictionary = {task: nn.Linear(n_hidden, n_classes) for task, n_classes in tasks.items()
+                      if task not in self.main_tasks_flattened}
+        for i, parallel_tasks in enumerate(self.main_tasks):
+            additional_factor = sum([tasks[prev_task] for prev_tasks in self.main_tasks[:i] for prev_task in prev_tasks])
+            dictionary.update(
+                {task: nn.Linear(n_hidden + additional_factor, tasks[task])
+                 for task in parallel_tasks}
+            )
+        self.clf = nn.ModuleDict(dictionary)
         self.dropout = nn.Dropout(dropout)
         self.activation = activation
+        print(self.clf)
 
     def forward(self, x):
         h = torch.cat([F.softmax(x[task], dim=-1) for task in self.tasks.keys()], dim=-1)
@@ -504,8 +570,21 @@ class PostProcessingMLTModel(nn.Module):
         h = self.activation(self.fc(h.squeeze()))
         h = F.normalize(h, p=2, dim=-1)
         h = self.dropout(h)
-        h = {task: self.clf[task](h) for task in self.tasks.keys()}
-        return h
+        prediction = {}
+        for task in self.tasks.keys():
+            if task not in self.main_tasks_flattened:
+                prediction[task] = self.clf[task](h)
+
+        for tasks in self.main_tasks:
+            tensor = h
+            first_task = tasks[0]
+            for prev_task in self.main_tasks_flattened:
+                if prev_task == first_task:
+                    break
+                tensor = torch.cat((tensor, prediction[prev_task]), dim=-1)
+            for task in tasks:
+                prediction[task] = self.clf[task](tensor)
+        return prediction
 
     def predict(self, x):
         h = {k: v for k, v in x.items() if k in self.tasks.keys()}
@@ -530,7 +609,8 @@ class ChordPrediction(LightningModule):
                  use_rotograd=False,
                  use_gradnorm=False,
                  weight_loss=True,
-                 device=0
+                 device=0,
+                 tasks_order=[]
                  ):
         super(ChordPrediction, self).__init__()
         self.tasks = tasks
@@ -538,7 +618,7 @@ class ChordPrediction(LightningModule):
         self.save_hyperparameters()
         self.num_tasks = len(tasks.keys())
         self.module = ChordPredictionModel(
-            in_feats, n_hidden, tasks, n_layers, activation, dropout,
+            in_feats, tasks_order, n_hidden, tasks, n_layers, activation, dropout,
             use_nade=use_nade, use_jk=use_jk).float().to(self.device)
         if self.use_rotograd:
             from rotograd import RotoGrad, cached
@@ -568,9 +648,11 @@ class ChordPrediction(LightningModule):
         self.test_roman = list()
         self.test_roman_ts = list()
         self.train_loss = MultiTaskLoss(
-            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss(ignore_index=-1) for task in tasks.keys()}), requires_grad=weight_loss)
+            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss(ignore_index=-1) for task in tasks.keys()}),
+            requires_grad=weight_loss)
         self.val_loss = MultiTaskLoss(
-            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss() for task in tasks.keys()}), requires_grad=False)
+            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss() for task in tasks.keys()}),
+            requires_grad=False)
         # self.train_acc = MultitaskAccuracy(tasks)
         # self.val_acc = MultitaskAccuracy(tasks)
         self.test_acc = MultitaskAccuracy(tasks)
@@ -596,7 +678,8 @@ class ChordPrediction(LightningModule):
             # batch_pred = {k: v.reshape(-1, v.shape[-1]) for k, v in batch_pred.items()}
             batch_labels = {k: v.reshape(-1) for k, v in batch_labels.items()}
             loss = self.train_loss(batch_pred, batch_labels)
-        self.log('train_loss', loss["total"].item(), on_step=False, on_epoch=True, prog_bar=False, batch_size=batch_size)
+        self.log('train_loss', loss["total"].item(), on_step=False, on_epoch=True, prog_bar=False,
+                 batch_size=batch_size)
         degree = torch.logical_and(
             batch_pred["degree1"].argmax(dim=1) == batch_labels["degree1"],
             batch_pred["degree2"].argmax(dim=1) == batch_labels["degree2"]).unsqueeze(0)
@@ -627,7 +710,8 @@ class ChordPrediction(LightningModule):
         inversion = (batch_pred["inversion"].argmax(dim=1) == batch_labels["inversion"]).unsqueeze(0)
         local_key = (batch_pred["localkey"].argmax(dim=1) == batch_labels["localkey"]).unsqueeze(0)
         acc_RomNum = (torch.cat((degree, quality, root, inversion, local_key), dim=0).sum(0) == 5).float()
-        self.log('Val RomNum', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=len(acc_RomNum))
+        self.log('Val RomNum', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True,
+                 batch_size=len(acc_RomNum))
 
     def test_step(self, batch, batch_idx):
         batch_inputs, edges, edge_type, batch_labels, onset_divs, name = batch
@@ -669,13 +753,15 @@ class ChordPrediction(LightningModule):
 
         acc_ts_RomNum = self.acc_compute_time_step(accs, batch_labels["onset"].detach().cpu())
         self.log('Test Degree', degree.float().mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
-        self.log('Test Roman Numeral (Onset)', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
+        self.log('Test Roman Numeral (Onset)', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True,
+                 batch_size=1)
         if isinstance(acc_ts_RomNum, dict):
             for k, v in acc_ts_RomNum.items():
                 self.log(f'Test {k} CSR', v.mean().item(), on_step=False,
                          on_epoch=True, prog_bar=True, batch_size=1)
         else:
-            self.log('Test Roman Numeral Time Step Accuracy', acc_ts_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
+            self.log('Test Roman Numeral Time Step Accuracy', acc_ts_RomNum.mean().item(), on_step=False, on_epoch=True,
+                     prog_bar=True, batch_size=1)
 
     # def test_epoch_end(self, outputs):
     #     acc_RomNum = torch.cat([o[0] for o in outputs])
@@ -714,7 +800,7 @@ class ChordPrediction(LightningModule):
     def configure_optimizers(self):
         if self.use_rotograd:
             optimizer = torch.optim.AdamW(
-                [{'params': m.parameters()} for m in self.module._backbone + self.module.heads] +\
+                [{'params': m.parameters()} for m in self.module._backbone + self.module.heads] + \
                 [{'params': self.module.parameters(), 'lr': self.lr}],
                 lr=self.lr,
                 weight_decay=self.weight_decay
@@ -724,8 +810,8 @@ class ChordPrediction(LightningModule):
                 {'params': self.module.parameters(), "lr": self.lr, "weight_decay": self.weight_decay},
                 {'params': self.train_loss.parameters(), 'weight_decay': 0, "lr": self.lr}]
             )
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min")
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[40, 80], gamma=0.5)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min")
+        # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[40, 80], gamma=0.5)
         return {
             "optimizer": optimizer,
             "lr_scheduler": scheduler,
@@ -746,7 +832,7 @@ class SingleTaskPrediction(LightningModule):
                  use_nade=False,
                  use_jk=False,
                  use_rotograd=False,
-                 device = 0
+                 device=0
                  ):
         super(SingleTaskPrediction, self).__init__()
         self.tasks = tasks
@@ -759,9 +845,11 @@ class SingleTaskPrediction(LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.train_loss = MultiTaskLoss(
-            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss(ignore_index=-1) for task in tasks.keys()}), requires_grad=False)
+            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss(ignore_index=-1) for task in tasks.keys()}),
+            requires_grad=False)
         self.val_loss = MultiTaskLoss(
-            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss() for task in tasks.keys()}), requires_grad=False)
+            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss() for task in tasks.keys()}),
+            requires_grad=False)
         self.test_acc = MultitaskAccuracy(tasks)
 
     def training_step(self, batch, batch_idx):
@@ -797,8 +885,10 @@ class SingleTaskPrediction(LightningModule):
         task = list(self.tasks.keys())[0]
         acc = (batch_pred[task].argmax(1) == batch_labels[task]).float().mean()
         self.log(f'Test Accuracy', acc.item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
-        acc_ts_RomNum = self.acc_compute_time_step(acc.detach().cpu().numpy(), batch_labels["onset"].detach().cpu().numpy())
-        self.log(f'Test Time Step Accuracy', acc_ts_RomNum.item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
+        acc_ts_RomNum = self.acc_compute_time_step(acc.detach().cpu().numpy(),
+                                                   batch_labels["onset"].detach().cpu().numpy())
+        self.log(f'Test Time Step Accuracy', acc_ts_RomNum.item(), on_step=False, on_epoch=True, prog_bar=True,
+                 batch_size=1)
 
     def predict_step(self, batch, batch_idx):
         batch_inputs, edges, edge_type, batch_labels, name = batch
@@ -822,7 +912,7 @@ class SingleTaskPrediction(LightningModule):
     def configure_optimizers(self):
         if self.use_rotograd:
             optimizer = torch.optim.AdamW(
-                [{'params': m.parameters()} for m in self.module._backbone + self.module.heads] +\
+                [{'params': m.parameters()} for m in self.module._backbone + self.module.heads] + \
                 [{'params': self.module.parameters(), 'lr': self.lr}],
                 lr=self.lr,
                 weight_decay=self.weight_decay
@@ -840,7 +930,6 @@ class SingleTaskPrediction(LightningModule):
         }
 
 
-
 class PostChordPrediction(LightningModule):
     def __init__(self,
                  in_feats: int,
@@ -855,24 +944,29 @@ class PostChordPrediction(LightningModule):
                  use_jk=False,
                  use_rotograd=False,
                  device=0,
-                 frozen_model = ChordPredictionModel(83)
+                 frozen_model=None,
+                 tasks_order=[]
                  ):
         super(PostChordPrediction, self).__init__()
         self.tasks = tasks
         self.num_tasks = len(tasks.keys())
         self.use_rotograd = use_rotograd
         self.save_hyperparameters()
-        assert(frozen_model is not None, "Need a frozen model to initialize the post-processing module.")
+        if frozen_model is None:
+            frozen_model=ChordPredictionModel(83, tasks_order=tasks_order)
+        assert (frozen_model is not None, "Need a frozen model to initialize the post-processing module.")
         self.frozen_model = frozen_model
-        self.module = PostProcessingMLTModel(tasks, n_hidden, n_layers, activation, dropout).float().to(self.device)
+        self.module = PostProcessingMLTModel(tasks, n_hidden, n_layers, activation, dropout, tasks_order=tasks_order).float().to(self.device)
         self.lr = lr
         self.weight_decay = weight_decay
         self.test_roman = list()
         self.test_roman_ts = list()
         self.train_loss = MultiTaskLoss(
-            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss(ignore_index=-1) for task in tasks.keys()}), requires_grad=not use_rotograd)
+            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss(ignore_index=-1) for task in tasks.keys()}),
+            requires_grad=not use_rotograd)
         self.val_loss = MultiTaskLoss(
-            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss() for task in tasks.keys()}), requires_grad=False)
+            list(tasks.keys()), nn.ModuleDict({task: nn.CrossEntropyLoss() for task in tasks.keys()}),
+            requires_grad=False)
         self.test_acc = MultitaskAccuracy(tasks)
 
     def training_step(self, batch, batch_idx):
@@ -889,7 +983,8 @@ class PostChordPrediction(LightningModule):
         batch_pred = {k: v.reshape(-1, v.shape[-1]) for k, v in batch_pred.items()}
         batch_labels = {k: v.reshape(-1) for k, v in batch_labels.items()}
         loss = self.train_loss(batch_pred, batch_labels)
-        self.log('train_loss', loss["total"].item(), on_step=False, on_epoch=True, prog_bar=False, batch_size=batch_size)
+        self.log('train_loss', loss["total"].item(), on_step=False, on_epoch=True, prog_bar=False,
+                 batch_size=batch_size)
         degree = torch.logical_and(
             batch_pred["degree1"].argmax(dim=1) == batch_labels["degree1"],
             batch_pred["degree2"].argmax(dim=1) == batch_labels["degree2"]).unsqueeze(0)
@@ -917,7 +1012,8 @@ class PostChordPrediction(LightningModule):
         inversion = (batch_pred["inversion"].argmax(dim=1) == batch_labels["inversion"]).unsqueeze(0)
         local_key = (batch_pred["localkey"].argmax(dim=1) == batch_labels["localkey"]).unsqueeze(0)
         acc_RomNum = (torch.cat((degree, quality, root, inversion, local_key), dim=0).sum(0) == 5).float()
-        self.log('Val RomNum', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=len(acc_RomNum))
+        self.log('Val RomNum', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True,
+                 batch_size=len(acc_RomNum))
 
     def test_step(self, batch, batch_idx):
         batch_inputs, edges, edge_type, batch_labels, onset_divs, name = batch
@@ -957,13 +1053,15 @@ class PostChordPrediction(LightningModule):
             accs["Roman Numeral"] = satb_rn.detach().cpu()
         acc_ts_RomNum = self.acc_compute_time_step(accs, batch_labels["onset"].detach().cpu())
         self.log('Test Degree', degree.float().mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
-        self.log('Test Roman Numeral (Onset)', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
+        self.log('Test Roman Numeral (Onset)', acc_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True,
+                 batch_size=1)
         if isinstance(acc_ts_RomNum, dict):
             for k, v in acc_ts_RomNum.items():
                 self.log(f'Test {k} CSR', v.mean().item(), on_step=False,
                          on_epoch=True, prog_bar=True, batch_size=1)
         else:
-            self.log('Test Roman Numeral Time Step Accuracy', acc_ts_RomNum.mean().item(), on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
+            self.log('Test Roman Numeral Time Step Accuracy', acc_ts_RomNum.mean().item(), on_step=False, on_epoch=True,
+                     prog_bar=True, batch_size=1)
 
     def predict_step(self, batch, batch_idx):
         batch_inputs, edges, edge_type, batch_labels, name = batch
@@ -995,14 +1093,13 @@ class PostChordPrediction(LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW([
-                {'params': self.module.parameters(), "lr": self.lr, "weight_decay": self.weight_decay},
-                {'params': self.train_loss.parameters(), 'weight_decay': 0, "lr": self.lr}]
-            )
+            {'params': self.module.parameters(), "lr": self.lr, "weight_decay": self.weight_decay},
+            {'params': self.train_loss.parameters(), 'weight_decay': 0, "lr": self.lr}]
+        )
         return {
             "optimizer": optimizer,
             "monitor": "val_loss"
         }
-
 
 
 def unique_onsets(onsets):

@@ -660,12 +660,12 @@ def solveChordSegmentation(df):
     return df.dropna()[df.hrhythm == 0]
 
 
-def resolveRomanNumeralCosine(b, t, a, s, pcs, key, numerator, tonicizedKey):
+def resolveRomanNumeralCosine(b, pcs, key, numerator, tonicizedKey):
     import music21
 
     pcs = eval(pcs) if isinstance(pcs, str) else pcs
     pcsetVector = np.zeros(12)
-    chord = music21.chord.Chord(f"{b}2 {t}3 {a}4 {s}5")
+    chord = music21.chord.Chord(f"{b}2")
     for n in chord.pitches:
         pcsetVector[n.pitchClass] += 1
     for pc in pcs:

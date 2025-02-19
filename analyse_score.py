@@ -4,19 +4,42 @@ import copy, os
 import numpy as np
 import partitura as pt
 # Testing with pretrained model
-from chordgnn.utils.chord_representations_latest import available_representations
+from chordgnn.utils.chord_representations import available_representations
 from chordgnn.models.chord import ChordPrediction, PostChordPrediction
 import torch
 import argparse
 
 
 parser = argparse.ArgumentParser("Chord Prediction")
-parser.add_argument("--use_ckpt", type=str, default="melkisedeath/chord_rec/model-kvd0jic5:v0",
+parser.add_argument("--use_ckpt", type=str, default="",
                     help="Wandb artifact to use for prediction")
-parser.add_argument("--score_path", type=str, default="./artifacts/op20n3-04.musicxml", help="Path to musicxml input score")
+parser.add_argument("--score_path", type=str, default="", help="Path to musicxml input score")
+parser.add_argument("--tasks_order", type=str, default="", help="Order of the sequential tasks for multi task MLP separated by comma. For not included tasks the parallel MLP is used.")
+parser.add_argument("--post_tasks_order", type=str, default="", help="Order of the sequential tasks for multi task MLP Post-Processing separated by comma. For not included tasks the parallel MLP is used.")
 
 args = parser.parse_args()
 
+def parse_tasks_order(input_str):
+    input_str = input_str.replace(" ", "").strip(',')
+
+    if len(input_str) == 0:
+        return []
+
+    if not re.fullmatch(r'(\w+|\[\w+(,\w+)*\])(,(\w+|\[\w+(,\w+)*\]))*', input_str):
+        raise ValueError("Error: Invalid input format. Ensure elements are valid words or lists of words.")
+
+    parts = re.findall(r'\[([^\[\]]*)\]|(\w+)', input_str)
+
+    result = []
+    for part in parts:
+        if part[0]:
+            result.append(part[0].split(','))
+        elif part[1]:
+            result.append([part[1]])
+    return result
+
+tasks_order = parse_tasks_order(args.tasks_order)
+post_tasks_order = parse_tasks_order(args.post_tasks_order)
 
 artifact_dir = os.path.normpath(f"./artifacts/{os.path.basename(args.use_ckpt)}")
 if not os.path.exists(artifact_dir):
@@ -25,14 +48,12 @@ if not os.path.exists(artifact_dir):
     artifact = api.artifact(args.use_ckpt, type="model")
     artifact_dir = artifact.download()
 
-tasks = {
-    "localkey": 38, "tonkey": 38, "degree1": 22, "degree2": 22, "quality": 11, "inversion": 4,
-    "root": 35, "romanNumeral": 31, "hrhythm": 7, "pcset": 121, "bass": 35, "tenor": 35,
-    "alto": 35, "soprano": 35}
+tasks = {"localkey": 35, "tonkey": 35, "degree1": 22, "degree2": 22, "quality": 16, "inversion": 4,
+    "root": 35, "romanNumeral": 76, "hrhythm": 2, "pcset": 94, "bass": 35}
 encoder = ChordPrediction(in_feats=83, n_hidden=256, tasks=tasks, n_layers=1, lr=0.0, dropout=0.0,
-                        weight_decay=0.0, use_nade=False, use_jk=False, use_rotograd=False, device="cpu").module
-model = PostChordPrediction(83, 256, tasks, 1, device="cpu", frozen_model=encoder)
-model = model.load_from_checkpoint(os.path.join(artifact_dir, "model.ckpt"))
+                        weight_decay=0.0, use_nade=False, use_jk=False, use_rotograd=False, device="cpu", tasks_order=tasks_order).module
+model = PostChordPrediction(83, 256, tasks, 1, device="cpu", tasks_order=post_tasks_order ,frozen_model=encoder)
+model = model.load_from_checkpoint(os.path.join(artifact_dir, "model.ckpt"), tasks_order=post_tasks_order , frozen_model=encoder)
 encoder = model.frozen_model
 model = model.module
 score = pt.load_score(args.score_path)
@@ -74,9 +95,6 @@ for analysis in dfout.itertuples():
     numerator = analysis.romanNumeral
     rn2, chordLabel = resolveRomanNumeralCosine(
         analysis.bass,
-        analysis.tenor,
-        analysis.alto,
-        analysis.soprano,
         pcset,
         thiskey,
         numerator,
