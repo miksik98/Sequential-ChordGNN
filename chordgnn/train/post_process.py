@@ -1,3 +1,5 @@
+import re
+
 import chordgnn as st
 import torch
 import random
@@ -29,12 +31,31 @@ parser.add_argument("--force_reload", action="store_true", help="Force reload of
 parser.add_argument("--use_ckpt", type=str, default=None, help="Use checkpoint for prediction.")
 parser.add_argument("--num_tasks", type=int, default=11, help="Number of tasks to train on.")
 parser.add_argument("--data_version", type=str, default="v1.0.0", choices=["v1.0.0", "latest"], help="Version of the dataset to use.")
+parser.add_argument("--mlp_tasks_order", type=str, default="", help="Order of the sequential tasks for multi task MLP separated by comma. For not included tasks the parallel MLP is used.")
 
 # for reproducibility
 torch.manual_seed(0)
 random.seed(0)
 torch.use_deterministic_algorithms(True)
 
+def transform_string(input_str):
+    input_str = input_str.replace(" ", "").strip(',')
+
+    if len(input_str) == 0:
+        return []
+
+    if not re.fullmatch(r'(\w+|\[\w+(,\w+)*\])(,(\w+|\[\w+(,\w+)*\]))*', input_str):
+        raise ValueError("Error: Invalid input format. Ensure elements are valid words or lists of words.")
+
+    parts = re.findall(r'\[([^\[\]]*)\]|(\w+)', input_str)
+
+    result = []
+    for part in parts:
+        if part[0]:
+            result.append(part[0].split(','))
+        elif part[1]:
+            result.append([part[1]])
+    return result
 
 args = parser.parse_args()
 if isinstance(eval(args.gpus), int):
@@ -52,6 +73,8 @@ n_hidden = args.n_hidden
 force_reload = False
 num_workers = args.num_workers
 
+tasks_order=transform_string(args.mlp_tasks_order)
+
 
 name = "Post-{}-{}x{}-lr={}-wd={}-dr={}".format("NADE" if args.use_nade else ("Rotograd" if args.use_rotograd else "Wloss"),
                                            n_layers, n_hidden,
@@ -59,8 +82,8 @@ name = "Post-{}-{}x{}-lr={}-wd={}-dr={}".format("NADE" if args.use_nade else ("R
 
 wandb_logger = WandbLogger(
     log_model=True,
-    project="chord_rec",
-    entity="melkisedeath",
+    project="project-name",
+    entity="entity-name",
     job_type="PostProcess",
     group=args.collection,
     name=name)
@@ -84,8 +107,8 @@ trainer = Trainer(
 
 import wandb, os
 run = wandb.init(
-    project="chord_rec",
-    entity="melkisedeath",
+    project="project-name",
+    entity="entity-name",
     job_type=f"PostProcess - data={args.data_version}",
     group=args.collection,
     name=name)
@@ -99,11 +122,10 @@ frozen_model = encoder.load_from_checkpoint(os.path.join(os.path.normpath(artifa
 model = st.models.chord.PostChordPrediction(
     datamodule.features, args.n_hidden, datamodule.tasks, args.n_layers, lr=args.lr, dropout=args.dropout,
     weight_decay=args.weight_decay, use_nade=args.use_nade, use_jk=args.use_jk, use_rotograd=args.use_rotograd,
-    device=dev, frozen_model=frozen_model
+    device=dev, frozen_model=frozen_model, tasks_order=tasks_order
     )
 trainer.fit(model, datamodule)
 trainer.test(model, datamodule, ckpt_path=checkpoint_callback.best_model_path)
-
 
 
 
