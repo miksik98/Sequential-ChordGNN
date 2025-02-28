@@ -11,7 +11,7 @@ import argparse
 
 
 parser = argparse.ArgumentParser("Chord Prediction")
-parser.add_argument("--use_ckpt", type=str, default="",
+parser.add_argument("--use_ckpt", type=str, default="model-2pesui9a-v0/model.ckpt",
                     help="Wandb artifact to use for prediction")
 parser.add_argument("--score_path", type=str, default="", help="Path to musicxml input score")
 parser.add_argument("--tasks_order", type=str, default="", help="Order of the sequential tasks for multi task MLP separated by comma. For not included tasks the parallel MLP is used.")
