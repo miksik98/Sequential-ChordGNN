@@ -72,7 +72,7 @@ The new score will be in the MusicXML format, and will contain the predicted Rom
 
 ## Pretrained Models
 
-Two pretrained models are attached to this repository in the ```artifacts``` folder. Model with ID ```4op89cyz``` was trained using following tasks ordering: ```[["pcset","hrhythm","bass","tonkey"],["localkey"],["root"],["inversion"],["degree1"],["degree2","quality"]]```. 
+Two pretrained models are attached to this repository in the ```artifacts``` folder. Model with ID ```4op89cyz``` was trained using following tasks ordering: ```[pcset,hrhythm,bass,tonkey],[localkey],[root],[inversion],[degree1],[degree2,quality]```. 
 Model with ID ```2pesui9a``` was trained with ```post_process.py``` using model ```4op89cyz``` as base model.
 
 ## Aknowledgements
