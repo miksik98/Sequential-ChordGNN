@@ -51,7 +51,7 @@ tasks = {"localkey": 35, "tonkey": 35, "degree1": 22, "degree2": 22, "quality": 
 encoder = ChordPrediction(in_feats=83, n_hidden=256, tasks=tasks, n_layers=1, lr=0.0, dropout=0.0,
                         weight_decay=0.0, use_nade=False, use_jk=False, use_rotograd=False, device="cpu", tasks_order=tasks_order).module
 model = PostChordPrediction(83, 256, tasks, 1, device="cpu", tasks_order=post_tasks_order, frozen_model=encoder)
-model = model.load_from_checkpoint(os.path.join(artifact_dir, "model.ckpt"), frozen_model=encoder)
+model = model.load_from_checkpoint(os.path.join(artifact_dir, "model.ckpt"), tasks_order=post_tasks_order, frozen_model=encoder)
 encoder = model.frozen_model
 model = model.module
 score = pt.load_score(args.score_path)
