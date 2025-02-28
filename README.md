@@ -70,6 +70,11 @@ Check all available options by -h. You can set tasks order in the sequence, also
 The produced analysis will be saved in the same directory as the score, with the same name and the suffix `-analysis`.
 The new score will be in the MusicXML format, and will contain the predicted Roman Numeral Analysis as harmony annotations of a new track with the harmonic rhythm as notes.
 
+## Pretrained Models
+
+Two pretrained models are attached to this repository in the ```artifacts``` folder. Model with ID ```4op89cyz``` was trained using following tasks ordering: ```[pcset,hrhythm,bass,tonkey],[localkey],[root],[inversion],[degree1],[degree2,quality]```. 
+Model with ID ```2pesui9a``` was trained with ```post_process.py``` using model ```4op89cyz``` as base model.
+
 ## Aknowledgements
 
 This research was carried out with the support of the Laboratory of Bioinformatics and Computational Genomics and the High Performance Computing Center of the Faculty of Mathematics and Information Science, Warsaw University of Technology.
