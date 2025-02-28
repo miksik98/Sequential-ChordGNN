@@ -7,6 +7,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.plugins import DDPPlugin
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import argparse
+import re
 
 
 parser = argparse.ArgumentParser()
@@ -29,12 +30,31 @@ parser.add_argument("--use_ckpt", type=str, default=None, help="Use checkpoint f
 parser.add_argument("--num_tasks", type=int, default=11, choices=[5, 11, 14], help="Number of tasks to train on.")
 parser.add_argument("--data_version", type=str, default="v1.0.0", choices=["v1.0.0", "latest"], help="Version of the dataset to use.")
 parser.add_argument("--n_epochs", type=int, default=100, help="Number of epochs to train for.")
+parser.add_argument("--mlp_tasks_order", type=str, default="", help="Order of the sequential tasks for multi task MLP separated by comma. For not included tasks the parallel MLP is used.")
 
 # for reproducibility
 torch.manual_seed(0)
 random.seed(0)
 torch.use_deterministic_algorithms(True)
 
+def transform_string(input_str):
+    input_str = input_str.replace(" ", "").strip(',')
+
+    if len(input_str) == 0:
+        return []
+
+    if not re.fullmatch(r'(\w+|\[\w+(,\w+)*\])(,(\w+|\[\w+(,\w+)*\]))*', input_str):
+        raise ValueError("Error: Invalid input format. Ensure elements are valid words or lists of words.")
+
+    parts = re.findall(r'\[([^\[\]]*)\]|(\w+)', input_str)
+
+    result = []
+    for part in parts:
+        if part[0]:
+            result.append(part[0].split(','))
+        elif part[1]:
+            result.append([part[1]])
+    return result
 
 args = parser.parse_args()
 if isinstance(eval(args.gpus), int):
@@ -52,6 +72,8 @@ n_hidden = args.n_hidden
 force_reload = False
 num_workers = args.num_workers
 
+tasks_order=transform_string(args.mlp_tasks_order)
+
 first_name = args.mtl_norm if args.mtl_norm != "none" else "Wloss"
 name = "{}-{}x{}-lr={}-wd={}-dr={}".format(first_name, n_layers, n_hidden,
                                             args.lr, args.weight_decay, args.dropout)
@@ -62,8 +84,8 @@ weight_loss = args.mtl_norm not in ["Neutral", "Rotograd", "GradNorm"]
 
 wandb_logger = WandbLogger(
     log_model=True,
-    entity="melkisedeath",
-    project="chord_rec",
+    entity="mikolasi-agh-university-of-krakow",
+    project="chordgnn",
     group=args.collection,
     # group="ablation",
     job_type=f"data={args.data_version}",
@@ -76,7 +98,7 @@ datamodule = st.data.AugmentedGraphDatamodule(
 model = st.models.chord.ChordPrediction(
     datamodule.features, args.n_hidden, datamodule.tasks, args.n_layers, lr=args.lr, dropout=args.dropout,
     weight_decay=args.weight_decay, use_nade=use_nade, use_jk=args.use_jk, use_rotograd=use_rotograd,
-    use_gradnorm=use_gradnorm, device=dev, weight_loss=weight_loss)
+    use_gradnorm=use_gradnorm, device=dev, weight_loss=weight_loss, tasks_order=tasks_order)
 checkpoint_callback = ModelCheckpoint(save_top_k=1, monitor="global_step", mode="max")
 early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.02, patience=5, verbose=False, mode="min")
 use_ddp = len(devices) > 1 if isinstance(devices, list) else False
@@ -94,8 +116,8 @@ if not args.predict:
     if args.use_ckpt is not None:
         import wandb, os
         run = wandb.init(
-            project="chord_rec",
-            entity="melkisedeath",
+            project="chordgnn",
+            entity="mikolasi-agh-university-of-krakow",
             group=args.collection,
             job_type=f"data={args.data_version}",
             name=name)
@@ -144,7 +166,3 @@ else:
     if not os.path.exists("./artifacts"):
         os.mkdir("./artifacts")
     df.to_csv(os.path.join("./artifacts", filename), index=False)
-
-
-
-
