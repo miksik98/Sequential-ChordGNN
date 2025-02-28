@@ -84,8 +84,8 @@ weight_loss = args.mtl_norm not in ["Neutral", "Rotograd", "GradNorm"]
 
 wandb_logger = WandbLogger(
     log_model=True,
-    entity="mikolasi-agh-university-of-krakow",
-    project="chordgnn",
+    entity="entity-name",
+    project="project-name",
     group=args.collection,
     # group="ablation",
     job_type=f"data={args.data_version}",
@@ -116,8 +116,8 @@ if not args.predict:
     if args.use_ckpt is not None:
         import wandb, os
         run = wandb.init(
-            project="chordgnn",
-            entity="mikolasi-agh-university-of-krakow",
+            project="project-name",
+            entity="entity-name",
             group=args.collection,
             job_type=f"data={args.data_version}",
             name=name)
