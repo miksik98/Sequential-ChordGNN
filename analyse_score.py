@@ -3,6 +3,7 @@ from chordgnn.utils.chord_representations import solveChordSegmentation, resolve
 import copy, os
 import numpy as np
 import partitura as pt
+import re
 # Testing with pretrained model
 from chordgnn.utils.chord_representations import available_representations
 from chordgnn.models.chord import ChordPrediction, PostChordPrediction
@@ -11,8 +12,8 @@ import argparse
 
 
 parser = argparse.ArgumentParser("Chord Prediction")
-parser.add_argument("--use_ckpt", type=str, default="model-2pesui9a-v0/model.ckpt",
-                    help="Wandb artifact to use for prediction")
+parser.add_argument("--use_ckpt", type=str, default="model-2pesui9a-v0",
+                    help="Folder with model checkpoint")
 parser.add_argument("--score_path", type=str, default="", help="Path to musicxml input score")
 parser.add_argument("--tasks_order", type=str, default="", help="Order of the sequential tasks for multi task MLP separated by comma. For not included tasks the parallel MLP is used.")
 parser.add_argument("--post_tasks_order", type=str, default="", help="Order of the sequential tasks for multi task MLP Post-Processing separated by comma. For not included tasks the parallel MLP is used.")
@@ -41,19 +42,16 @@ def parse_tasks_order(input_str):
 tasks_order = parse_tasks_order(args.tasks_order)
 post_tasks_order = parse_tasks_order(args.post_tasks_order)
 
-artifact_dir = os.path.normpath(f"./artifacts/{os.path.basename(args.use_ckpt)}")
+artifact_dir = os.path.normpath(f"./artifacts/{args.use_ckpt}")
 if not os.path.exists(artifact_dir):
-    import wandb
-    api = wandb.Api()
-    artifact = api.artifact(args.use_ckpt, type="model")
-    artifact_dir = artifact.download()
+    raise ValueError(f"Error: given folder {artifact_dir} with model checkpoint does not exist.")
 
 tasks = {"localkey": 35, "tonkey": 35, "degree1": 22, "degree2": 22, "quality": 16, "inversion": 4,
     "root": 35, "romanNumeral": 76, "hrhythm": 2, "pcset": 94, "bass": 35}
 encoder = ChordPrediction(in_feats=83, n_hidden=256, tasks=tasks, n_layers=1, lr=0.0, dropout=0.0,
                         weight_decay=0.0, use_nade=False, use_jk=False, use_rotograd=False, device="cpu", tasks_order=tasks_order).module
-model = PostChordPrediction(83, 256, tasks, 1, device="cpu", tasks_order=post_tasks_order ,frozen_model=encoder)
-model = model.load_from_checkpoint(os.path.join(artifact_dir, "model.ckpt"), tasks_order=post_tasks_order , frozen_model=encoder)
+model = PostChordPrediction(83, 256, tasks, 1, device="cpu", tasks_order=post_tasks_order, frozen_model=encoder)
+model = model.load_from_checkpoint(os.path.join(artifact_dir, "model.ckpt"), frozen_model=encoder)
 encoder = model.frozen_model
 model = model.module
 score = pt.load_score(args.score_path)
@@ -140,21 +138,6 @@ for item in bass_part.iter_all(pt.score.TimeSignature):
 for item in bass_part.measures:
     rn_part.add(item, item.start.t, item.end.t)
 pt.score.tie_notes(rn_part)
-
-# # TODO: Repair Short Key changes and check correctness.
-# rna_annotations = list(rn_part.iter_all(pt.score.Harmony))
-# # find indices of rna_annotations text that contain : character
-# key_change = np.array([(i, x.text[:x.text.index(':')]) for i, x in enumerate(rna_annotations) if ":" in x.text], dtype=[("idx", "i4"), ("key", "U10")])
-# # find where indices are consecutive
-# c = np.where(np.diff(key_change["idx"]) < 2)[0] + 1
-# c = c[c != key_change["idx"].argmax()]
-# problematic_indices = c[np.where(key_change["key"][c+1] == key_change["key"][c-1])]
-# key_change_indices = key_change["key"][problematic_indices]
-# for idx in key_change_indices:
-#     if "/" in rna_annotations[idx].text:
-#         rna_annotations[idx].text = rna_annotations[idx].text[rna_annotations[idx].text.index(":")+1:rna_annotations[idx].text.index("/")]
-#     else:
-#         rna_annotations[idx].text = rna_annotations[idx].text[rna_annotations[idx].text.index(":")+1:] # + "/ degree difference between previous key and current key"
 
 score.parts.append(rn_part)
 pt.save_musicxml(score, f"{os.path.splitext(args.score_path)[0]}-analysis.musicxml")
